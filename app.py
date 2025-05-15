@@ -17,10 +17,21 @@ if uploaded_file:
     for col in date_cols:
         df[col] = pd.to_datetime(df[col], errors='coerce')
 
-    # Add Month-Year column based on Service Restored Date
+    # Add Month-Year column
     df['Month-Year'] = df['Service Restored Date'].dt.strftime('%b-%Y')
 
-    # Calculate Final MTD and Final MTR
+    # Priority settings
+    priority_order = ['P1', 'P2', 'P3', 'P4', 'P5']
+    priority_colors = {
+        'P1': '#EF553B',  # red
+        'P2': '#636EFA',  # blue
+        'P3': '#00CC96',  # green
+        'P4': '#AB63FA',  # purple
+        'P5': '#FFA15A',  # orange
+    }
+    df['Priority'] = pd.Categorical(df['Priority'], categories=priority_order, ordered=True)
+
+    # Calculate Final MTD and MTR
     def calc_mtd(row):
         if str(row['Case Origin']).strip().lower() in ['internal call logging', 'web']:
             return 0
@@ -38,7 +49,7 @@ if uploaded_file:
 
     # Filters
     months = sorted(df['Month-Year'].dropna().unique(), key=lambda x: pd.to_datetime(x, format='%b-%Y'))
-    priorities = sorted(df['Priority'].dropna().unique())
+    priorities = [p for p in priority_order if p in df['Priority'].unique()]
 
     with st.sidebar:
         st.header("📅 Filters")
@@ -48,23 +59,33 @@ if uploaded_file:
     # Apply filters
     filtered_df = df[df['Month-Year'].isin(selected_months) & df['Priority'].isin(selected_priorities)]
 
+    # Summary generator
     def generate_avg_summary(df, metric):
         summary = df.groupby(['Month-Year', 'Priority'])[metric].mean().reset_index()
-        summary = summary.sort_values(by='Month-Year', key=lambda x: pd.to_datetime(x, format='%b-%Y'))
+        summary['Priority'] = pd.Categorical(summary['Priority'], categories=priority_order, ordered=True)
+        summary = summary.sort_values(by=['Month-Year', 'Priority'], key=lambda x: x.map(lambda y: pd.to_datetime(y, format='%b-%Y')) if x.name == 'Month-Year' else x)
         return summary
 
     mtd_avg = generate_avg_summary(filtered_df, 'Final MTD')
     mtr_avg = generate_avg_summary(filtered_df, 'Final MTR')
 
-    # Display summaries
+    # Display tabs
     tab1, tab2, tab3 = st.tabs(["📈 MTTD Summary", "📉 MTTR Summary", "📁 Main Data"])
 
     with tab1:
         st.subheader("📈 Monthly Avg MTTD")
         mtd_pivot = mtd_avg.pivot(index='Month-Year', columns='Priority', values='Final MTD')
+        mtd_pivot = mtd_pivot.loc[mtd_pivot.index.sort_values(key=lambda x: pd.to_datetime(x, format='%b-%Y'))]
         st.dataframe(mtd_pivot.style.format("{:.2f}"), use_container_width=True)
-        fig = px.line(mtd_avg, x='Month-Year', y='Final MTD', color='Priority', markers=True,
-                      title="MTTD Over Time by Priority")
+        fig = px.line(
+            mtd_avg,
+            x='Month-Year',
+            y='Final MTD',
+            color='Priority',
+            markers=True,
+            title="MTTD Over Time by Priority",
+            color_discrete_map=priority_colors
+        )
         fig.update_layout(
             xaxis_title='Month-Year',
             yaxis_title='Average MTTD (minutes)',
@@ -77,9 +98,17 @@ if uploaded_file:
     with tab2:
         st.subheader("📉 Monthly Avg MTTR")
         mtr_pivot = mtr_avg.pivot(index='Month-Year', columns='Priority', values='Final MTR')
+        mtr_pivot = mtr_pivot.loc[mtr_pivot.index.sort_values(key=lambda x: pd.to_datetime(x, format='%b-%Y'))]
         st.dataframe(mtr_pivot.style.format("{:.2f}"), use_container_width=True)
-        fig = px.line(mtr_avg, x='Month-Year', y='Final MTR', color='Priority', markers=True,
-                      title="MTTR Over Time by Priority")
+        fig = px.line(
+            mtr_avg,
+            x='Month-Year',
+            y='Final MTR',
+            color='Priority',
+            markers=True,
+            title="MTTR Over Time by Priority",
+            color_discrete_map=priority_colors
+        )
         fig.update_layout(
             xaxis_title='Month-Year',
             yaxis_title='Average MTTR (minutes)',
@@ -93,7 +122,7 @@ if uploaded_file:
         st.subheader("📁 Filtered Main Data")
         st.dataframe(filtered_df, use_container_width=True)
 
-    # === Summary with count, sum, avg ===
+    # Full summary for export
     def full_summary(df, metric, label):
         grouped = df.groupby(['Month-Year', 'Priority']).agg(
             COUNT=(metric, 'count'),
@@ -104,7 +133,7 @@ if uploaded_file:
         for m in sorted(grouped['Month-Year'].unique(), key=lambda x: pd.to_datetime(x, format='%b-%Y')):
             row = {'Month-Year': m}
             month_data = grouped[grouped['Month-Year'] == m]
-            for p in priorities:
+            for p in priority_order:
                 match = month_data[month_data['Priority'] == p]
                 if not match.empty:
                     row[f'{p} (COUNT)'] = int(match['COUNT'].values[0])
@@ -124,7 +153,7 @@ if uploaded_file:
     mtd_summary_full = full_summary(filtered_df, 'Final MTD', 'MTTD')
     mtr_summary_full = full_summary(filtered_df, 'Final MTR', 'MTTR')
 
-    # === Download full report ===
+    # Excel export
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         filtered_df.to_excel(writer, sheet_name='Main Data', index=False)
